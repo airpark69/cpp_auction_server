@@ -1,0 +1,9 @@
+# MSYS2 설치 및 Cmake 설치 필요
+
+# MSYS2 CMD
+## Boost 라이브러리 설치
+- pacman -S mingw-w64-ucrt-x86_64-boost
+
+
+
+
