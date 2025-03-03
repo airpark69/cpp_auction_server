@@ -22,13 +22,13 @@ namespace Protocol {
         PURCHASE_ITEM_RESPONSE = 8,
         CANCEL_LISTING = 9,
         CANCEL_LISTING_RESPONSE = 10,
-        ERROR = 255
+        ERROR_MESSAGE = 255
     };
     
     // 응답 상태 열거형
     enum class ResponseStatus : uint8_t {
         SUCCESS = 0,
-        ERROR = 1
+        FAILURE = 1
     };
     
     // 네트워크 바이트 순서 변환 함수 (호스트 -> 네트워크)
