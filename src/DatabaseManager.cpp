@@ -8,6 +8,8 @@
 
 using bsoncxx::builder::stream::document;
 using bsoncxx::builder::stream::open_document;
+using bsoncxx::builder::stream::open_array;
+using bsoncxx::builder::stream::close_array;
 using bsoncxx::builder::stream::close_document;
 using bsoncxx::builder::stream::finalize;
 using json = nlohmann::json;
@@ -68,16 +70,15 @@ bool DatabaseManager::saveAuctionItem(const AuctionItem& item) {
 
 std::optional<AuctionItem> DatabaseManager::getAuctionItem(uint64_t id) {
     try {
-        // 캐시 확인
         if (redis_available_) {
             std::string cache_key = getItemCacheKey(id);
             auto cached = redis_->get(cache_key);
-            
+            // 캐시 적중
             if (cached) {
                 // 캐시에서 아이템 파싱
                 json item_json = json::parse(*cached);
                 AuctionItem item;
-                // JSON에서 AuctionItem으로 변환 (실제 구현에서는 더 복잡할 수 있음)
+                // JSON에서 AuctionItem으로 변환
                 item.id = item_json["id"];
                 item.seller_id = item_json["seller_id"];
                 item.buyer_id = item_json["buyer_id"];
@@ -100,7 +101,8 @@ std::optional<AuctionItem> DatabaseManager::getAuctionItem(uint64_t id) {
             }
         }
         
-        // 캐시 미스, DB에서 조회
+        // 캐시 Miss의 경우
+        // - DB에서 조회
         auto collection = getAuctionCollection();
         auto filter = document{} << "id" << static_cast<int64_t>(id) << finalize;
         
@@ -407,45 +409,54 @@ std::vector<AuctionItem> DatabaseManager::getItemsByCategory(uint32_t category, 
 }
 
 bsoncxx::document::value DatabaseManager::itemToBson(const AuctionItem& item) {
-    using bsoncxx::builder::stream::array;
+    using bsoncxx::builder::basic::kvp;
+    using bsoncxx::builder::basic::make_document;
+    using bsoncxx::builder::basic::make_array;
     
-    auto builder = document{};
-    
-    builder << "id" << static_cast<int64_t>(item.id)
-            << "seller_id" << static_cast<int32_t>(item.seller_id)
-            << "buyer_id" << static_cast<int32_t>(item.buyer_id)
-            << "price" << static_cast<int32_t>(item.price)
-            << "status" << static_cast<int>(item.status)
-            << "registration_time" << static_cast<int64_t>(item.registration_time)
-            << "expiration_time" << static_cast<int64_t>(item.expiration_time)
-            << "sold_time" << static_cast<int64_t>(item.sold_time)
-            << "item" << open_document
-                << "id" << static_cast<int32_t>(item.item.id)
-                << "name" << item.item.name
-                << "description" << item.item.description
-                << "type" << static_cast<int32_t>(item.item.type)
-                << "rarity" << static_cast<int32_t>(item.item.rarity)
-                << "level" << static_cast<int32_t>(item.item.level)
-                << "owner_id" << static_cast<int32_t>(item.item.owner_id);
-    
-    // 아이템 속성 배열 추가
+    // 아이템 속성 배열 생성
+    bsoncxx::builder::basic::array attributes_array;
     if (!item.item.attributes.empty()) {
-        auto attributes_array = array{};
-        
         for (const auto& attr : item.item.attributes) {
-            attributes_array << open_document
-                             << "name" << attr.name
-                             << "value" << attr.value
-                             << close_document;
+            attributes_array.append(
+                make_document(
+                    kvp("name", attr.name),
+                    kvp("value", attr.value)
+                )
+            );
         }
-        
-        builder << "attributes" << attributes_array;
     }
     
-    builder << close_document;
+    // 아이템 서브 문서 생성
+    auto item_doc = bsoncxx::builder::basic::document{};
+    item_doc.append(kvp("id", static_cast<int32_t>(item.item.id)));
+    item_doc.append(kvp("name", item.item.name));
+    item_doc.append(kvp("description", item.item.description));
+    item_doc.append(kvp("type", static_cast<int32_t>(item.item.type)));
+    item_doc.append(kvp("rarity", static_cast<int32_t>(item.item.rarity)));
+    item_doc.append(kvp("level", static_cast<int32_t>(item.item.level)));
+    item_doc.append(kvp("owner_id", static_cast<int32_t>(item.item.owner_id)));
+    // 속성 배열이 비어있지 않으면 아이템 문서에 추가
+    if (!item.item.attributes.empty()) {
+        item_doc.append(kvp("attributes", attributes_array));
+    }
     
-    return builder << finalize;
+    // 메인 문서 생성
+    auto doc = make_document(
+        kvp("id", static_cast<int64_t>(item.id)),
+        kvp("seller_id", static_cast<int32_t>(item.seller_id)),
+        kvp("buyer_id", static_cast<int32_t>(item.buyer_id)),
+        kvp("price", static_cast<int32_t>(item.price)),
+        kvp("views", static_cast<int32_t>(item.views)),
+        kvp("status", static_cast<int>(item.status)),
+        kvp("registration_time", static_cast<int64_t>(item.registration_time)),
+        kvp("expiration_time", static_cast<int64_t>(item.expiration_time)),
+        kvp("sold_time", static_cast<int64_t>(item.sold_time)),
+        kvp("item", item_doc)
+    );
+    
+    return doc;
 }
+
 
 AuctionItem DatabaseManager::bsonToItem(const bsoncxx::document::view& doc) {
     AuctionItem item;
@@ -454,32 +465,34 @@ AuctionItem DatabaseManager::bsonToItem(const bsoncxx::document::view& doc) {
     item.seller_id = doc["seller_id"].get_int32();
     item.buyer_id = doc["buyer_id"].get_int32();
     item.price = doc["price"].get_int32();
-    item.status = static_cast<AuctionStatus>(doc["status"].get_int32());
+    item.views = doc["views"].get_int32();
+    item.status = static_cast<AuctionStatus>(doc["status"].get_int32().value);
     item.registration_time = doc["registration_time"].get_int64();
     item.expiration_time = doc["expiration_time"].get_int64();
     item.sold_time = doc["sold_time"].get_int64();
     
     auto item_doc = doc["item"].get_document().view();
     item.item.id = item_doc["id"].get_int32();
-    item.item.name = item_doc["name"].get_utf8().value.to_string();
-    item.item.description = item_doc["description"].get_utf8().value.to_string();
+    item.item.name = bsoncxx::string::to_string(item_doc["name"].get_string().value);
+    item.item.description = bsoncxx::string::to_string(item_doc["description"].get_string().value);
     item.item.type = item_doc["type"].get_int32();
     item.item.rarity = item_doc["rarity"].get_int32();
     item.item.level = item_doc["level"].get_int32();
     item.item.owner_id = item_doc["owner_id"].get_int32();
     
     // 아이템 속성 배열 파싱
-    if (item_doc["attributes"]) {
-        auto attributes = item_doc["attributes"].get_array().value;
+    if (doc["attributes"]) {
+        auto attributes_array = doc["attributes"].get_array().value;
         
-        for (auto&& attr_doc : attributes) {
-            auto attr_view = attr_doc.get_document().view();
-            
-            ItemAttribute attr;
-            attr.name = attr_view["name"].get_utf8().value.to_string();
-            attr.value = attr_view["value"].get_utf8().value.to_string();
-            
-            item.item.attributes.push_back(attr);
+        for (auto&& attr_doc : attributes_array) {
+            if (attr_doc.type() == bsoncxx::type::k_document) {
+                auto attr_view = attr_doc.get_document().view();
+                
+                ItemAttribute attr;
+                attr.name = bsoncxx::string::to_string(attr_view["name"].get_string().value);
+                attr.value = bsoncxx::string::to_string(attr_view["value"].get_string().value);
+                item.item.attributes.push_back(attr);
+            }
         }
     }
     

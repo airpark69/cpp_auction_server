@@ -23,6 +23,7 @@ enum class AuctionStatus {
 struct AuctionItem {
     uint64_t id;                 // 경매 ID
     Item item;                   // 아이템 정보
+    uint32_t views;              // 아이템 조회수
     uint32_t seller_id;          // 판매자 ID
     uint32_t buyer_id;           // 구매자 ID (판매 전: 0)
     uint32_t price;              // 판매 가격
