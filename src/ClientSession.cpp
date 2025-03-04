@@ -78,10 +78,17 @@ void ClientSession::read_body(uint32_t body_size) {
 
 void ClientSession::handle_read_body(const boost::system::error_code& error, size_t bytes_transferred) {
     if (!error) {
-        // 버퍼에서 메시지 추출
-        std::string message(
-            boost::asio::buffer_cast<const char*>(read_buffer_.data()),
-            bytes_transferred);
+        // 버퍼에서 메시지 추출 (최신 Boost.Asio 방식)
+        std::string message;
+        message.resize(bytes_transferred);
+        
+        // 방법 1: buffer_copy 사용
+        boost::asio::buffer_copy(boost::asio::buffer(message), read_buffer_.data(), bytes_transferred);
+        
+        // 또는 방법 2: 직접 데이터 복사
+        // const char* data = boost::asio::buffer_cast<const char*>(read_buffer_.data());
+        // std::copy(data, data + bytes_transferred, message.begin());
+        
         read_buffer_.consume(bytes_transferred);
         
         // 메시지 처리
@@ -480,9 +487,10 @@ void ClientSession::read_body(uint32_t body_size) {
 void ClientSession::handle_read_body(const boost::system::error_code& error, size_t bytes_transferred) {
     if (!error) {
         // 버퍼에서 메시지 추출
-        std::string message(
-            boost::asio::buffer_cast<const char*>(read_buffer_.data()),
-            bytes_transferred);
+        std::string message;
+        message.resize(bytes_transferred);
+        
+        boost::asio::buffer_copy(boost::asio::buffer(message), read_buffer_.data(), bytes_transferred);
         read_buffer_.consume(bytes_transferred);
         
         // 메시지 처리

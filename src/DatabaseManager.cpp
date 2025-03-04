@@ -41,6 +41,10 @@ DatabaseManager::~DatabaseManager() {
     spdlog::info("DatabaseManager destroyed");
 }
 
+mongocxx::client& DatabaseManager::getMongoClient() {
+    return mongo_client_;
+}
+
 std::shared_ptr<Transaction> DatabaseManager::beginTransaction() {
     return std::make_shared<Transaction>(shared_from_this());
 }
@@ -53,13 +57,19 @@ mongocxx::collection DatabaseManager::getUserCollection() {
     return db_["users"];
 }
 
-bool DatabaseManager::saveAuctionItem(const AuctionItem& item) {
+bool DatabaseManager::saveAuctionItem(const AuctionItem& item, mongocxx::client_session* session) {
     try {
         auto collection = getAuctionCollection();
         auto doc = itemToBson(item);
-        
-        auto result = collection.insert_one(doc.view());
-        return result && result->result().inserted_count() == 1;
+        if (session) {
+            // 세션이 제공된 경우 (트랜잭션 내에서 실행)
+            auto result = collection.insert_one(*session, doc.view());
+            return result && result->result().inserted_count() == 1;
+        } else {
+            // 세션이 없는 경우 (독립 실행)
+            auto result = collection.insert_one(doc.view());
+            return result && result->result().inserted_count() == 1;
+        }
     } catch (const mongocxx::exception& e) {
         spdlog::error("MongoDB error in saveAuctionItem: {}", e.what());
         return false;
@@ -145,15 +155,20 @@ std::optional<AuctionItem> DatabaseManager::getAuctionItem(uint64_t id) {
     }
 }
 
-bool DatabaseManager::updateAuctionItem(const AuctionItem& item) {
+bool DatabaseManager::updateAuctionItem(const AuctionItem& item, mongocxx::client_session* session) {
     try {
         auto collection = getAuctionCollection();
         auto filter = document{} << "id" << static_cast<int64_t>(item.id) << finalize;
         auto update = document{} << "$set" << itemToBson(item).view() << finalize;
+        bsoncxx::v_noabi::stdx::optional<mongocxx::v_noabi::result::update> result;
+
+        if (session) {
+            result = collection.update_one(*session, filter.view(), update.view());
+        } else {
+            result = collection.update_one(filter.view(), update.view());
+        }
         
-        auto result = collection.update_one(filter.view(), update.view());
-        
-        // 캐시 업데이트
+        // 캐시 무효화
         if (redis_available_) {
             std::string cache_key = getItemCacheKey(item.id);
             redis_->del(cache_key);
@@ -166,14 +181,19 @@ bool DatabaseManager::updateAuctionItem(const AuctionItem& item) {
     }
 }
 
-bool DatabaseManager::deleteAuctionItem(uint64_t id) {
+bool DatabaseManager::deleteAuctionItem(uint64_t id, mongocxx::client_session* session) {
     try {
         auto collection = getAuctionCollection();
         auto filter = document{} << "id" << static_cast<int64_t>(id) << finalize;
+        bsoncxx::v_noabi::stdx::optional<mongocxx::v_noabi::result::delete_result> result;
+
+        if (session) {
+            result = collection.delete_one(*session, filter.view());
+        } else {
+            result = collection.delete_one(filter.view());
+        }
         
-        auto result = collection.delete_one(filter.view());
-        
-        // 캐시에서 삭제
+        // 캐시 무효화
         if (redis_available_) {
             std::string cache_key = getItemCacheKey(id);
             redis_->del(cache_key);
@@ -205,26 +225,28 @@ std::vector<AuctionItem> DatabaseManager::loadAllAuctionItems() {
     return items;
 }
 
-bool DatabaseManager::updateUserBalance(uint32_t user_id, int32_t amount) {
+bool DatabaseManager::updateUserBalance(uint32_t user_id, int32_t amount, mongocxx::client_session* session) {
     try {
         auto collection = getUserCollection();
         auto filter = document{} << "id" << static_cast<int32_t>(user_id) << finalize;
         
         // 사용자 정보 가져오기
-        auto user_doc = collection.find_one(filter.view());
+        std::optional<bsoncxx::document::value> user_doc;
+        if (session) {
+            auto result = collection.find_one(*session, filter.view());
+            if (result) user_doc = *result;            
+        } else {
+            auto result = collection.find_one(filter.view());
+            if (result) user_doc = *result;            
+        }
+        
         if (!user_doc) {
             spdlog::error("User {} not found", user_id);
             return false;
         }
         
         // 현재 잔액 가져오기
-        int32_t current_balance = 0;
-        try {
-            current_balance = user_doc->view()["balance"].get_int32();
-        } catch (const std::exception& e) {
-            spdlog::error("Error getting user balance: {}", e.what());
-            return false;
-        }
+        int32_t current_balance = user_doc->view()["balance"].get_int32();
         
         // 새 잔액 계산
         int32_t new_balance = current_balance + amount;
@@ -240,14 +262,19 @@ bool DatabaseManager::updateUserBalance(uint32_t user_id, int32_t amount) {
         auto update = document{} << "$set" << open_document <<
             "balance" << new_balance << close_document << finalize;
         
-        auto result = collection.update_one(filter.view(), update.view());
-        
-        return result && result->modified_count() == 1;
+        if (session) {
+            auto result = collection.update_one(*session, filter.view(), update.view());
+            return result && result->modified_count() == 1;
+        } else {
+            auto result = collection.update_one(filter.view(), update.view());
+            return result && result->modified_count() == 1;
+        }
     } catch (const mongocxx::exception& e) {
         spdlog::error("MongoDB error in updateUserBalance: {}", e.what());
         return false;
     }
 }
+
 
 std::optional<UserInfo> DatabaseManager::getUserInfo(uint32_t user_id) {
     try {
@@ -407,44 +434,55 @@ std::vector<AuctionItem> DatabaseManager::getItemsByCategory(uint32_t category, 
 }
 
 bsoncxx::document::value DatabaseManager::itemToBson(const AuctionItem& item) {
-    using bsoncxx::builder::stream::array;
+    using bsoncxx::builder::basic::kvp;
+    using bsoncxx::builder::basic::make_document;
+    using bsoncxx::builder::basic::make_array;
     
-    auto builder = document{};
-    
-    builder << "id" << static_cast<int64_t>(item.id)
-            << "seller_id" << static_cast<int32_t>(item.seller_id)
-            << "buyer_id" << static_cast<int32_t>(item.buyer_id)
-            << "price" << static_cast<int32_t>(item.price)
-            << "status" << static_cast<int>(item.status)
-            << "registration_time" << static_cast<int64_t>(item.registration_time)
-            << "expiration_time" << static_cast<int64_t>(item.expiration_time)
-            << "sold_time" << static_cast<int64_t>(item.sold_time)
-            << "item" << open_document
-                << "id" << static_cast<int32_t>(item.item.id)
-                << "name" << item.item.name
-                << "description" << item.item.description
-                << "type" << static_cast<int32_t>(item.item.type)
-                << "rarity" << static_cast<int32_t>(item.item.rarity)
-                << "level" << static_cast<int32_t>(item.item.level)
-                << "owner_id" << static_cast<int32_t>(item.item.owner_id);
-    
-    // 아이템 속성 배열 추가
+    // 아이템 속성 배열 생성
+    bsoncxx::builder::basic::array attributes_array;
     if (!item.item.attributes.empty()) {
-        auto attributes_array = array{};
-        
         for (const auto& attr : item.item.attributes) {
-            attributes_array << open_document
-                             << "name" << attr.name
-                             << "value" << attr.value
-                             << close_document;
+            attributes_array.append(
+                make_document(
+                    kvp("name", attr.name),
+                    kvp("value", attr.value)
+                )
+            );
         }
-        
-        builder << "attributes" << attributes_array;
     }
     
-    builder << close_document;
+    // 아이템 서브 문서 생성
+    bsoncxx::builder::basic::document item_doc_builder;
+    item_doc_builder.append(
+        kvp("id", static_cast<int32_t>(item.item.id)),
+        kvp("name", item.item.name),
+        kvp("description", item.item.description),        
+        kvp("type", static_cast<int32_t>(item.item.type)),
+        kvp("rarity", static_cast<int32_t>(item.item.rarity)),
+        kvp("level", static_cast<int32_t>(item.item.level)),
+        kvp("owner_id", static_cast<int32_t>(item.item.owner_id))
+    );
     
-    return builder << finalize;
+    // 속성 배열이 비어있지 않으면 아이템 문서에 추가
+    if (!item.item.attributes.empty()) {        
+        item_doc_builder.append(kvp("attributes", attributes_array));
+    }
+    auto item_doc = item_doc_builder.extract();
+    // 메인 문서 생성
+    auto doc = make_document(
+        kvp("id", static_cast<int64_t>(item.id)),
+        kvp("seller_id", static_cast<int32_t>(item.seller_id)),
+        kvp("buyer_id", static_cast<int32_t>(item.buyer_id)),
+        kvp("price", static_cast<int32_t>(item.price)),
+        kvp("views", static_cast<int32_t>(item.views)),
+        kvp("status", static_cast<int>(item.status)),
+        kvp("registration_time", static_cast<int64_t>(item.registration_time)),
+        kvp("expiration_time", static_cast<int64_t>(item.expiration_time)),
+        kvp("sold_time", static_cast<int64_t>(item.sold_time)),
+        kvp("item", item_doc.view())
+    );
+    
+    return doc;
 }
 
 AuctionItem DatabaseManager::bsonToItem(const bsoncxx::document::view& doc) {
@@ -454,15 +492,16 @@ AuctionItem DatabaseManager::bsonToItem(const bsoncxx::document::view& doc) {
     item.seller_id = doc["seller_id"].get_int32();
     item.buyer_id = doc["buyer_id"].get_int32();
     item.price = doc["price"].get_int32();
-    item.status = static_cast<AuctionStatus>(doc["status"].get_int32());
+    item.views = doc["views"].get_int32();
+    item.status = static_cast<AuctionStatus>(doc["status"].get_int32().value);
     item.registration_time = doc["registration_time"].get_int64();
     item.expiration_time = doc["expiration_time"].get_int64();
     item.sold_time = doc["sold_time"].get_int64();
     
     auto item_doc = doc["item"].get_document().view();
     item.item.id = item_doc["id"].get_int32();
-    item.item.name = item_doc["name"].get_utf8().value.to_string();
-    item.item.description = item_doc["description"].get_utf8().value.to_string();
+    item.item.name = bsoncxx::string::to_string(item_doc["name"].get_string().value);
+    item.item.description = bsoncxx::string::to_string(item_doc["description"].get_string().value);
     item.item.type = item_doc["type"].get_int32();
     item.item.rarity = item_doc["rarity"].get_int32();
     item.item.level = item_doc["level"].get_int32();
@@ -476,8 +515,8 @@ AuctionItem DatabaseManager::bsonToItem(const bsoncxx::document::view& doc) {
             auto attr_view = attr_doc.get_document().view();
             
             ItemAttribute attr;
-            attr.name = attr_view["name"].get_utf8().value.to_string();
-            attr.value = attr_view["value"].get_utf8().value.to_string();
+            attr.name = bsoncxx::string::to_string(attr_view["name"].get_string().value);
+            attr.value = bsoncxx::string::to_string(attr_view["value"].get_string().value);
             
             item.item.attributes.push_back(attr);
         }
@@ -492,30 +531,4 @@ std::string DatabaseManager::getSearchCacheKey(size_t criteria_hash) {
 
 std::string DatabaseManager::getItemCacheKey(uint64_t item_id) {
     return "item:" + std::to_string(item_id);
-}
-
-// Transaction 클래스 구현
-Transaction::Transaction(std::shared_ptr<DatabaseManager> db_manager)
-    : db_manager_(db_manager), committed_(false) {
-    // 실제 MongoDB 트랜잭션 시작
-    // MongoDB 4.0 이상에서는 세션과 트랜잭션 API를 사용할 수 있음
-    // 이 예제에서는 간단히 구현
-}
-
-Transaction::~Transaction() {
-    if (!committed_) {
-        rollback();
-    }
-}
-
-void Transaction::commit() {
-    // 트랜잭션 커밋
-    committed_ = true;
-    spdlog::debug("Transaction committed");
-}
-
-void Transaction::rollback() {
-    // 트랜잭션 롤백
-    committed_ = true; // 소멸자에서 다시 롤백하지 않도록 설정
-    spdlog::debug("Transaction rolled back");
 }

@@ -28,19 +28,22 @@ private:
 public:
     DatabaseManager(const std::string& mongo_uri, const std::string& redis_uri = "tcp://localhost:6379");
     ~DatabaseManager();
-    
+
+    // MongoDB 클라이언트 접근자
+    mongocxx::client& getMongoClient();
+
     // 트랜잭션 관리
     std::shared_ptr<Transaction> beginTransaction();
     
     // 경매 아이템 CRUD 작업
-    bool saveAuctionItem(const AuctionItem& item);
+    bool saveAuctionItem(const AuctionItem& item, mongocxx::client_session* session = nullptr);
     std::optional<AuctionItem> getAuctionItem(uint64_t id);
-    bool updateAuctionItem(const AuctionItem& item);
-    bool deleteAuctionItem(uint64_t id);
+    bool updateAuctionItem(const AuctionItem& item, mongocxx::client_session* session = nullptr);
+    bool deleteAuctionItem(uint64_t id, mongocxx::client_session* session = nullptr);
     std::vector<AuctionItem> loadAllAuctionItems();
     
     // 사용자 관련 작업
-    bool updateUserBalance(uint32_t user_id, int32_t amount);
+    bool DatabaseManager::updateUserBalance(uint32_t user_id, int32_t amount, mongocxx::client_session* session = nullptr);
     std::optional<UserInfo> getUserInfo(uint32_t user_id);
     
     // 캐싱 관련 메서드
@@ -65,14 +68,49 @@ private:
 
 // 트랜잭션 클래스
 class Transaction {
-private:
-    std::shared_ptr<DatabaseManager> db_manager_;
-    bool committed_;
-    
-public:
-    Transaction(std::shared_ptr<DatabaseManager> db_manager);
-    ~Transaction();
-    
-    void commit();
-    void rollback();
+    private:
+        std::shared_ptr<DatabaseManager> db_manager_;
+        mongocxx::client_session session_;
+        bool committed_;
+        
+    public:
+        Transaction(std::shared_ptr<DatabaseManager> db_manager)
+            : db_manager_(db_manager), 
+              session_(db_manager->getMongoClient().start_session()),
+              committed_(false) {
+            // 트랜잭션 시작
+            mongocxx::options::transaction options;
+            session_.start_transaction(options);
+            spdlog::debug("Transaction started with MongoDB session");
+        }
+        
+        ~Transaction() {
+            if (!committed_) {
+                try {
+                    rollback();
+                } catch (const std::exception& e) {
+                    spdlog::error("Error during transaction rollback in destructor: {}", e.what());
+                }
+            }
+        }
+        
+        mongocxx::client_session& session() {
+            return session_;
+        }
+        
+        void commit() {
+            if (!committed_) {
+                session_.commit_transaction();
+                committed_ = true;
+                spdlog::debug("Transaction committed");
+            }
+        }
+        
+        void rollback() {
+            if (!committed_) {
+                session_.abort_transaction();
+                committed_ = true; // 소멸자에서 다시 롤백하지 않도록 설정
+                spdlog::debug("Transaction rolled back");
+            }
+        }
 };
