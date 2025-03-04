@@ -7,9 +7,6 @@ namespace Protocol {
     // 최대 메시지 크기 (10MB)
     constexpr uint32_t MAX_MESSAGE_SIZE = 10 * 1024 * 1024;
     
-    // 현재 처리 중인 메시지 크기 (네트워크 바이트 순서)
-    inline uint32_t current_message_size_ = 0;
-    
     // 메시지 타입 열거형
     enum class MessageType : uint8_t {
         LOGIN = 1,

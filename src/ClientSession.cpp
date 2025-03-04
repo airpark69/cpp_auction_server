@@ -32,10 +32,10 @@ void ClientSession::stop() {
 void ClientSession::read_header() {
     auto self = shared_from_this();
     
-    // 4바이트 메시지 길이 헤더 읽기
+    // 4바이트 메시지 길이 헤더 읽기 -- 메시지 길이
     boost::asio::async_read(
         socket_,
-        boost::asio::buffer(&Protocol::current_message_size_, sizeof(uint32_t)),
+        boost::asio::buffer(&current_message_size_, sizeof(uint32_t)),
         [this, self](const boost::system::error_code& error, size_t bytes_transferred) {
             handle_read_header(error, bytes_transferred);
         });
@@ -44,7 +44,7 @@ void ClientSession::read_header() {
 void ClientSession::handle_read_header(const boost::system::error_code& error, size_t bytes_transferred) {
     if (!error && bytes_transferred == sizeof(uint32_t)) {
         // 네트워크 바이트 순서에서 호스트 바이트 순서로 변환
-        uint32_t message_size = ntohl(Protocol::current_message_size_);
+        uint32_t message_size = ntohl(current_message_size_);
         
         // 메시지 크기가 최대 허용 크기를 초과하는지 확인
         if (message_size > Protocol::MAX_MESSAGE_SIZE) {

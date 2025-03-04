@@ -15,6 +15,7 @@ class ClientSession : public std::enable_shared_from_this<ClientSession> {
 private:
     tcp::socket socket_;
     boost::asio::streambuf read_buffer_;
+    uint32_t current_message_size_;
     std::queue<std::string> write_queue_;
     std::mutex write_mutex_;
     uint32_t user_id_;
