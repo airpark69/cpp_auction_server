@@ -80,7 +80,7 @@ void ClientSession::handle_read_body(const boost::system::error_code& error, siz
     if (!error) {
         // 버퍼에서 메시지 추출
         std::string message(
-            boost::asio::buffer_cast<const char*>(read_buffer_.data()),
+            static_cast<const char*>(read_buffer_.data().data()),
             bytes_transferred);
         read_buffer_.consume(bytes_transferred);
         
