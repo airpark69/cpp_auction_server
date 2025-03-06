@@ -10,6 +10,7 @@
 
 using boost::asio::ip::tcp;
 using json = nlohmann::json;
+using MessageHandler = std::function<void(const json&)>;
 
 class ClientSession : public std::enable_shared_from_this<ClientSession> {
 private:
@@ -22,12 +23,14 @@ private:
     bool authenticated_;
     std::shared_ptr<AuctionHouse> auction_house_;
     bool is_writing_;
-    
+    std::unordered_map<Protocol::MessageType, MessageHandler> message_handlers_;
+
 public:
     ClientSession(tcp::socket socket, std::shared_ptr<AuctionHouse> auction_house);
     ~ClientSession();
     
     void start();
+    
     void stop();
     tcp::socket& socket() { return socket_; }
     void send(const std::string& message);
@@ -35,11 +38,13 @@ public:
     uint32_t get_user_id() const { return user_id_; }
     
 private:
+    void initialize_handlers();
+    bool check_authentication();
     void read_header();
     void handle_read_header(const boost::system::error_code& error, size_t bytes_transferred);
     void read_body(uint32_t body_size);
     void handle_read_body(const boost::system::error_code& error, size_t bytes_transferred);
-    void process_message(const std::string& message);
+    void process_message(const json& data);
     void write();
     void handle_write(const boost::system::error_code& error);
     

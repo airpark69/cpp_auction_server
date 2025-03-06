@@ -9,6 +9,7 @@ ClientSession::ClientSession(tcp::socket socket, std::shared_ptr<AuctionHouse> a
       authenticated_(false),
       auction_house_(auction_house),
       is_writing_(false) {
+        initialize_handlers();
 }
 
 ClientSession::~ClientSession() {
@@ -97,61 +98,43 @@ void ClientSession::handle_read_body(const boost::system::error_code& error, siz
     }
 }
 
-void ClientSession::process_message(const std::string& message) {
-    try {
-        // JSON 파싱
-        json data = json::parse(message);
-        
-        // 메시지 타입 확인
-        if (!data.contains("type") || !data["type"].is_string()) {
-            send_error("Invalid message format: missing or invalid 'type' field");
-            return;
-        }
-        
-        std::string type = data["type"];
-        
-        // 메시지 타입에 따라 적절한 핸들러 호출
-        if (type == "login") {
-            handle_login(data);
-        } else if (type == "register_item") {
-            // 인증 확인
-            if (!authenticated_) {
-                send_error("Authentication required");
-                return;
-            }
-            handle_register_item(data);
-        } else if (type == "search_items") {
-            handle_search_items(data);
-        } else if (type == "purchase_item") {
-            // 인증 확인
-            if (!authenticated_) {
-                send_error("Authentication required");
-                return;
-            }
-            handle_purchase_item(data);
-        } else if (type == "cancel_listing") {
-            // 인증 확인
-            if (!authenticated_) {
-                send_error("Authentication required");
-                return;
-            }
-            handle_cancel_listing(data);
-        } else {
-            send_error("Unknown message type: " + type);
-        }
-    } catch (const json::parse_error& e) {
-        spdlog::error("JSON parse error: {}", e.what());
-        send_error("Invalid JSON format");
-    } catch (const std::exception& e) {
-        spdlog::error("Exception in process_message: {}", e.what());
-        send_error("Internal server error");
+void ClientSession::initialize_handlers() {
+    message_handlers_[Protocol::MessageType::LOGIN] = [this](const json& data) { handle_login(data); };
+    message_handlers_[Protocol::MessageType::REGISTER_ITEM] = [this](const json& data) { 
+        if (check_authentication()) handle_register_item(data); 
+    };
+    message_handlers_[Protocol::MessageType::SEARCH_ITEMS] = [this](const json& data) { handle_search_items(data); };
+    message_handlers_[Protocol::MessageType::PURCHASE_ITEM] = [this](const json& data) { 
+        if (check_authentication()) handle_purchase_item(data); 
+    };
+    message_handlers_[Protocol::MessageType::CANCEL_LISTING] = [this](const json& data) { 
+        if (check_authentication()) handle_cancel_listing(data); 
+    };
+}
+
+bool ClientSession::check_authentication() {
+    if (!authenticated_) {
+        send_error("Authentication required");
+        return false;
+    }
+    return true;
+}
+
+
+void ClientSession::process_message(const json& data) {
+    Protocol::MessageType msg_type = data["type"];
+    auto handler = message_handlers_.find(msg_type);
+    if (handler != message_handlers_.end()) {
+        handler->second(data);
+    } else {
+        send_error("Unknown message type: " + std::to_string(static_cast<int>(msg_type)));
     }
 }
 
 void ClientSession::send(const std::string& message) {
     auto self = shared_from_this();
     
-    // 스레드 안전을 위한 락 사용
+    // 스레드 안전을 위한 락 사용 --> 이 부분이 비동기 작업인 handle_write()의 뮤텍스와 연결되어서 일관성을 보장함
     std::lock_guard<std::mutex> lock(write_mutex_);
     
     // 메시지를 큐에 추가
@@ -229,7 +212,7 @@ void ClientSession::handle_login(const json& data) {
         
         // 성공 응답 전송
         json response = {
-            {"status", "success"},
+            {"status", Protocol::ResponseStatus::SUCCESS},
             {"user_id", user_id_},
             {"session_token", session_token}
         };
@@ -401,7 +384,7 @@ void ClientSession::handle_cancel_listing(const json& data) {
 
 void ClientSession::send_error(const std::string& message) {
     json response = {
-        {"status", "error"},
+        {"status", Protocol::ResponseStatus::FAILURE},
         {"message", message}
     };
     
@@ -412,7 +395,7 @@ void ClientSession::send_error(const std::string& message) {
 void ClientSession::send_success(const json& data) {
     json response = data;
     if (!response.contains("status")) {
-        response["status"] = "success";
+        response["status"] = Protocol::ResponseStatus::SUCCESS;
     }
     
     send(response.dump());

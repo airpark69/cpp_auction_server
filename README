@@ -9,8 +9,10 @@
 - c++의 boost::asio 라이브러리를 사용한 경매장 게임 서버 개발
 
 # 아키텍트
-- Server Class에서 tcp::acceptor 로 TCP 소켓 연결을 대기
-- Boost.Asio의 io_context를 통해 비동기 작업 스케쥴링, 실행
-- 클라이언트에서 연결이 들어올 경우, ClientSession 인스턴스가 생성되어 통신 시작
-- 클라이언트의 연결을 세션으로 관리
+- (Server.cpp)Server Class에서 tcp::acceptor 로 TCP 소켓 연결을 대기
+- (Server.cpp)Boost.Asio의 io_context를 통해 비동기 작업 스케쥴링, 실행
+- (Server.cpp)클라이언트에서 연결이 들어올 경우, ClientSession 인스턴스가 생성되어 통신 시작
+- (Server.cpp)클라이언트의 연결을 세션으로 관리
+- (ClientSession.cpp)프로토콜은 TCP 소켓 연결으로, 4바이트 헤더(메세지 사이즈)와 body 부분을 메세지로 보냄
+- 메세지 구조 - {"type": "메세지 타입", "각 타입에 맞는 변수": "변수값"} 의 형식
 - 
