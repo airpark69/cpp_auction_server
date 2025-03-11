@@ -23,7 +23,7 @@ private:
     bool running_;
     
 public:
-    AuctionServer(int port, int thread_count, const std::string& db_connection_string);
+    AuctionServer(int port, int thread_count, const std::string& db_connection_string = "tcp://localhost:27017");
     ~AuctionServer();
     
     void start();
